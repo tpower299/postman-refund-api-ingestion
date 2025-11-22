@@ -1,0 +1,19 @@
+name: Sync Refund API
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  test-job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Test message
+        run: echo "Workflow is running successfully!"
+
+      # You can add your API sync steps here later
+
