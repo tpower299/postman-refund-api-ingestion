@@ -1,58 +1,42 @@
-name: Sync Refund API Spec to Postman
+name: Sync API Specs to Postman   # Only once at the top
 
 on:
   push:
     paths:
-      - 'specs/payment-refund-api-openapi.yaml'
-  workflow_dispatch:
+      - 'specs/**/*.yaml'
+      - 'specs/**/*.json'
 
 jobs:
-  sync:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Display files (debug)
-        run: ls -R .
-
-      - name: Update API Spec in Postman
-        run: |
-          echo "Updating Postman API spec..."
-          
-          curl -X PUT "https://api.getpostman.com/specs/${{ secrets.POSTMAN_SPEC_ID }}" \
-            -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            --data-binary @specs/payment-refund-api-openapi.yaml
-
-      - name: Regenerate Collection from Spec
-        run: |
-          echo "Regenerating collection..."
-          
-          curl -X POST "https://api.getpostman.com/specs/${{ secrets.POSTMAN_SPEC_ID }}/generations/collection" \
-            -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d '{"options": {"requestParametersResolution": "example", "exampleParametersResolution": "example"}}'
-
-      - name: Done!
-        run: echo "Sync complete 🎉"
-name: Sync Refund API
-
-on:
-  push:
-    branches:
-      - main
-
-jobs:
-  test-job:
+  sync-specs:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
-      - name: Test message
-        run: echo "Workflow is running successfully!"
+      - name: Update Spec in Postman
+        run: |
+          SPEC_ID="${{ secrets.POSTMAN_SPEC_ID }}"
+          WORKSPACE_ID="${{ secrets.POSTMAN_WORKSPACE_ID }}"
 
-      # You can add your API sync steps here later
+          # Update spec content
+          curl -X PUT "https://api.getpostman.com/specs/$SPEC_ID" \
+            -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d @specs/payment-refund-api.json
+
+      - name: Regenerate Collection
+        run: |
+          SPEC_ID="${{ secrets.POSTMAN_SPEC_ID }}"
+
+          curl -X POST "https://api.getpostman.com/specs/$SPEC_ID/generations/collection" \
+            -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"options": {"requestParametersResolution": "example"}}'
+
+      - name: Run Collection Tests
+        run: |
+          COLLECTION_ID="${{ secrets.POSTMAN_COLLECTION_ID }}"
+
+          npx postman-cli collection run $COLLECTION_ID \
+            --environment ${{ secrets.POSTMAN_ENVIRONMENT_ID }} \
+            --api-key ${{ secrets.POSTMAN_API_KEY }}
 
