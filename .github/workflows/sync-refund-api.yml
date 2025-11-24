@@ -1,3 +1,42 @@
+name: Sync Refund API Spec to Postman
+
+on:
+  push:
+    paths:
+      - 'specs/payment-refund-api-openapi.yaml'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Display files (debug)
+        run: ls -R .
+
+      - name: Update API Spec in Postman
+        run: |
+          echo "Updating Postman API spec..."
+          
+          curl -X PUT "https://api.getpostman.com/specs/${{ secrets.POSTMAN_SPEC_ID }}" \
+            -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            --data-binary @specs/payment-refund-api-openapi.yaml
+
+      - name: Regenerate Collection from Spec
+        run: |
+          echo "Regenerating collection..."
+          
+          curl -X POST "https://api.getpostman.com/specs/${{ secrets.POSTMAN_SPEC_ID }}/generations/collection" \
+            -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"options": {"requestParametersResolution": "example", "exampleParametersResolution": "example"}}'
+
+      - name: Done!
+        run: echo "Sync complete 🎉"
 name: Sync Refund API
 
 on:
