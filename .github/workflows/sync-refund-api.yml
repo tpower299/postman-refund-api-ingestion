@@ -10,42 +10,68 @@ jobs:
   sync-and-test:
     runs-on: ubuntu-latest
     steps:
-      # 1. Checkout the repo
+      # 1. Checkout repository
       - uses: actions/checkout@v3
 
-      # 2. Update API spec in Postman
-      - name: Update API Spec in Postman
+      # 2. Update Spec in Postman
+      - name: Update Spec in Postman
         run: |
           echo "Updating Postman API spec..."
-          curl -s -X PUT "https://api.getpostman.com/specs/${{ secrets.POSTMAN_SPEC_ID }}" \
+          curl -X PUT "https://api.getpostman.com/specs/${{ secrets.POSTMAN_SPEC_ID }}" \
             -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d @specs/payment-refund-api-openapi.yaml
 
       # 3. Regenerate collection from spec
-      - name: Regenerate Collection
+      - name: Regenerate Collection from Spec
         run: |
           echo "Regenerating collection from spec..."
-          curl -s -X POST "https://api.getpostman.com/specs/${{ secrets.POSTMAN_SPEC_ID }}/generations/collection" \
+          curl -X POST "https://api.getpostman.com/specs/${{ secrets.POSTMAN_SPEC_ID }}/generations/collection" \
             -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d '{"options": {"requestParametersResolution": "example"}}'
 
-      # 4. Run collection tests against mock server
+      # 4. Generate fresh JWT
+      - name: Generate JWT Token
+        id: generate_jwt
+        run: |
+          echo "Fetching new JWT token..."
+          JWT_TOKEN=$(curl -s -X POST "${{ secrets.JWT_TOKEN_URL }}" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "client_id=${{ secrets.JWT_CLIENT_ID }}" \
+            -d "client_secret=${{ secrets.JWT_CLIENT_SECRET }}" \
+            -d "audience=${{ secrets.JWT_AUDIENCE }}" \
+            -d "grant_type=client_credentials" | jq -r '.access_token')
+          
+          echo "JWT_TOKEN=$JWT_TOKEN" >> $GITHUB_ENV
+
+      # 5. Run collection tests for each environment
       - name: Run Collection Tests
         run: |
-          echo "Running collection tests with mock server..."
           COLLECTION_ID="${{ secrets.POSTMAN_COLLECTION_ID }}"
-          BASE_URL="${{ secrets.BASE_URL }}"
 
-          curl -s -X POST "https://api.getpostman.com/collections/$COLLECTION_ID/run" \
-            -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d "{
-                  \"environment\": {
-                    \"values\": [
-                      {\"key\": \"baseUrl\", \"value\": \"$BASE_URL\", \"enabled\": true}
-                    ]
-                  }
-                }"
+          for ENV in dev qa uat prod
+          do
+            echo "Running collection for environment: $ENV"
+            
+            # Define base URL for each environment (mock server for demo)
+            case $ENV in
+              dev) BASE_URL="https://ac1d1bb2-eba1-4c5e-b492-9483f4410770.mock.pstmn.io/dev" ;;
+              qa) BASE_URL="https://ac1d1bb2-eba1-4c5e-b492-9483f4410770.mock.pstmn.io/qa" ;;
+              uat) BASE_URL="https://ac1d1bb2-eba1-4c5e-b492-9483f4410770.mock.pstmn.io/uat" ;;
+              prod) BASE_URL="https://ac1d1bb2-eba1-4c5e-b492-9483f4410770.mock.pstmn.io/prod" ;;
+            esac
+
+            curl -X POST "https://api.getpostman.com/collections/$COLLECTION_ID/run" \
+              -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                    \"environment\": {
+                      \"values\": [
+                        {\"key\": \"baseUrl\", \"value\": \"$BASE_URL\", \"enabled\": true},
+                        {\"key\": \"jwtToken\", \"value\": \"$JWT_TOKEN\", \"enabled\": true}
+                      ]
+                    }
+                  }"
+          done
 
