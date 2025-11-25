@@ -1,47 +1,43 @@
-name: Sync API Specs to Postman
+name: Sync Refund API to Postman
 
 on:
   push:
     paths:
-      - 'specs/**/*.yaml'
-      - 'specs/**/*.json'
+      - 'specs/payment-refund-api-openapi.yaml'
 
 jobs:
-  sync-specs:
+  sync:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Checkout repository
-      - uses: actions/checkout@v3
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
-      # Step 2: Update Spec in Postman
       - name: Update Spec in Postman
         run: |
-          SPEC_ID="${{ secrets.POSTMAN_SPEC_ID }}"
-          WORKSPACE_ID="${{ secrets.POSTMAN_WORKSPACE_ID }}"
+          # Convert YAML to escaped string for JSON payload
+          SPEC_CONTENT=$(sed 's/"/\\"/g' specs/payment-refund-api-openapi.yaml)
 
-          # Update spec content
-          curl -X PUT "https://api.getpostman.com/specs/$SPEC_ID" \
+          curl -X PUT "https://api.getpostman.com/specs/${{ secrets.POSTMAN_SPEC_ID }}" \
             -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
             -H "Content-Type: application/json" \
-            -d @specs/payment-refund-api-openapi.yaml
+            -d "{\"spec\": {\"name\": \"Refund API\", \"content\": \"${SPEC_CONTENT}\", \"contentType\": \"yaml\"}}"
 
-      # Step 3: Regenerate Collection from Spec
       - name: Regenerate Collection
         run: |
-          SPEC_ID="${{ secrets.POSTMAN_SPEC_ID }}"
-
-          curl -X POST "https://api.getpostman.com/specs/$SPEC_ID/generations/collection" \
+          curl -X POST "https://api.getpostman.com/specs/${{ secrets.POSTMAN_SPEC_ID }}/generations/collection" \
             -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d '{"options": {"requestParametersResolution": "example"}}'
 
-      # Step 4: Run Collection Tests
+      - name: Install Postman CLI
+        run: npm install -g postman-cli
+
+      - name: Login using Postman API Key
+        run: |
+          postman login --with-api-key ${{ secrets.POSTMAN_API_KEY }}
+
       - name: Run Collection Tests
         run: |
-          COLLECTION_ID="${{ secrets.POSTMAN_COLLECTION_ID }}"
-
-          npx postman-cli collection run $COLLECTION_ID \
-            --environment ${{ secrets.POSTMAN_ENVIRONMENT_ID }} \
-            --api-key ${{ secrets.POSTMAN_API_KEY }}
+          postman collection run 49129178-b921efd6-4b20-4f46-bb5c-ec04b16df293
 
