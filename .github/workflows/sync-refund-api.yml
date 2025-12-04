@@ -1,136 +1,287 @@
-name: Sync API Specs and Run Tests
+name: Sync API Spec → Generate Collection (Completed Adoption Kit)
 
 on:
   push:
     paths:
-      - 'specs/**/*.yaml'
-      - 'specs/**/*.json'
+      - "specs/**/*.yaml"
+      - "specs/**/*.yml"
+      - "specs/**/*.json"
+  workflow_dispatch:
 
 jobs:
-  sync-and-test:
+  sync-api:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        env: [DEV, QA, UAT, PROD]
-
+    
+    defaults:
+      run:
+        shell: bash -e {0}
+        
+    env:
+      POSTMAN_WORKSPACE_ID: ${{ secrets.POSTMAN_WORKSPACE_ID }} 
+      POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
+      # Your verified Mock Server URL
+      MOCK_SERVER_URL: https://ac1d1bb2-eba1-4c5e-b492-9483f4410770.mock.pstmn.io
+      # Public URL for mocking token acquisition (JWT script dependency)
+      AUTH_SERVER_URL: https://postman-echo.com/post
+      
     steps:
-      # 1. Checkout repo
       - uses: actions/checkout@v3
-
-      # 2. Set environment variables based on matrix
-      - name: Set Environment Variables
+      - uses: actions/setup-node@v4
+      - name: Install Dependencies
         run: |
-          if [ "${{ matrix.env }}" = "DEV" ]; then
-            BASE_URL="${{ secrets.BASE_URL_DEV }}"
-            JWT_CLIENT_ID="${{ secrets.JWT_CLIENT_ID_DEV }}"
-            JWT_CLIENT_SECRET="${{ secrets.JWT_CLIENT_SECRET_DEV }}"
-            JWT_TOKEN_URL="${{ secrets.JWT_TOKEN_URL_DEV }}"
-            JWT_AUDIENCE="${{ secrets.JWT_AUDIENCE_DEV }}"
-          elif [ "${{ matrix.env }}" = "QA" ]; then
-            BASE_URL="${{ secrets.BASE_URL_QA }}"
-            JWT_CLIENT_ID="${{ secrets.JWT_CLIENT_ID_QA }}"
-            JWT_CLIENT_SECRET="${{ secrets.JWT_CLIENT_SECRET_QA }}"
-            JWT_TOKEN_URL="${{ secrets.JWT_TOKEN_URL_QA }}"
-            JWT_AUDIENCE="${{ secrets.JWT_AUDIENCE_QA }}"
-          elif [ "${{ matrix.env }}" = "UAT" ]; then
-            BASE_URL="${{ secrets.BASE_URL_UAT }}"
-            JWT_CLIENT_ID="${{ secrets.JWT_CLIENT_ID_UAT }}"
-            JWT_CLIENT_SECRET="${{ secrets.JWT_CLIENT_SECRET_UAT }}"
-            JWT_TOKEN_URL="${{ secrets.JWT_TOKEN_URL_UAT }}"
-            JWT_AUDIENCE="${{ secrets.JWT_AUDIENCE_UAT }}"
-          elif [ "${{ matrix.env }}" = "PROD" ]; then
-            BASE_URL="${{ secrets.BASE_URL_PROD }}"
-            JWT_CLIENT_ID="${{ secrets.JWT_CLIENT_ID_PROD }}"
-            JWT_CLIENT_SECRET="${{ secrets.JWT_CLIENT_SECRET_PROD }}"
-            JWT_TOKEN_URL="${{ secrets.JWT_TOKEN_URL_PROD }}"
-            JWT_AUDIENCE="${{ secrets.JWT_AUDIENCE_PROD }}"
+          npm install -g openapi-to-postmanv2 newman
+          sudo apt-get install -y jq
+      #######################################################################
+      # 1. Detect File & Extract Name
+      #######################################################################
+      - name: Detect Spec File and Name
+        id: spec
+        run: |
+          # Find the first YAML or JSON file in the specs folder
+          FILE=$(find specs -type f \( -name "*.yaml" -o -name "*.yml" -o -name "*.json" \) | head -n 1)
+          
+          if [ -z "$FILE" ]; then
+            echo "::error::No spec file found in specs/ folder"
+            exit 1
           fi
-          echo "BASE_URL=$BASE_URL" >> $GITHUB_ENV
-          echo "JWT_CLIENT_ID=$JWT_CLIENT_ID" >> $GITHUB_ENV
-          echo "JWT_CLIENT_SECRET=$JWT_CLIENT_SECRET" >> $GITHUB_ENV
-          echo "JWT_TOKEN_URL=$JWT_TOKEN_URL" >> $GITHUB_ENV
-          echo "JWT_AUDIENCE=$JWT_AUDIENCE" >> $GITHUB_ENV
-          echo "ENV=${{ matrix.env }}" >> $GITHUB_ENV
-      # 3. Check if spec exists (Get metadata)
-      - name: Check If Spec Exists
-        id: checkspec
+          # Use Node.js to extract the title cleanly (handles quotes/spaces better than grep)
+          SPEC_NAME=$(node -e "
+            const fs = require('fs');
+            try {
+              const content = fs.readFileSync('$FILE', 'utf8');
+              // Regex to find 'title:' followed by text, ignoring quotes
+              const match = content.match(/title:\s*(?:[\"']?)(.*?)(?:[\"']?)\s*$/m);
+              if (match && match[1]) console.log(match[1].trim());
+              else console.log('');
+            } catch (e) { console.log(''); }
+          ")
+          # Fallback to filename if title extraction failed
+          if [[ -z "$SPEC_NAME" ]]; then
+            SPEC_NAME=$(basename "$FILE")
+            echo "::warning::Could not extract 'title' from YAML. Using filename: $SPEC_NAME"
+          fi
+          
+          echo "Checked File: $FILE"
+          echo "Extracted Spec Name: '$SPEC_NAME'"
+          
+          echo "specfile=$FILE" >> $GITHUB_OUTPUT
+          echo "specname=$SPEC_NAME" >> $GITHUB_OUTPUT
+      #######################################################################
+      # 2. CLEAN SYNC SPEC: UPDATE OLD & CREATE NEW
+      #######################################################################
+      - name: Clean Sync Spec in Spec Hub
+        id: create_spec
         run: |
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
-            "https://api.getpostman.com/specs/${{ secrets.POSTMAN_SPEC_ID }}")
-          echo "HTTP_STATUS=$STATUS" >> $GITHUB_ENV
-          echo "Spec lookup returned: $STATUS"
-      # 4a. Create spec if not found
-      - name: Create Spec in Postman (if missing)
-        if: env.HTTP_STATUS == '404'
-        run: |
-          echo "Spec not found — creating new spec…"
-          curl -X POST \
-            "https://api.getpostman.com/specs?workspaceId=${{ secrets.POSTMAN_WORKSPACE_ID }}" \
-            -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
+          SPEC_NAME="${{ steps.spec.outputs.specname }}"
+          FILE="${{ steps.spec.outputs.specfile }}"
+          
+          echo "🔎 Checking for existing specs named: '$SPEC_NAME'..."
+          
+          # 1. Fetch all specs
+          LIST_RESPONSE=$(curl -s -X GET "https://api.getpostman.com/specs?workspaceId=$POSTMAN_WORKSPACE_ID" \
+            -H "X-Api-Key: $POSTMAN_API_KEY")
+            
+          # 2. Find ALL IDs with this name
+          MATCHING_IDS=$(echo "$LIST_RESPONSE" | jq -r --arg name "$SPEC_NAME" '.specs[] | select(.name == $name) | .id')
+          
+          # 3. DELETE them (Clear the path)
+          if [ -n "$MATCHING_IDS" ]; then
+            for ID in $MATCHING_IDS; do
+              echo "🗑️ Deleting existing/stale Spec ID: $ID"
+              curl -s -X DELETE \
+                "https://api.getpostman.com/specs/$ID" \
+                -H "X-Api-Key: $POSTMAN_API_KEY" > /dev/null
+            done
+            echo "✅ Cleanup complete."
+          fi
+          # 4. CREATE New Spec
+          echo "🆕 Creating fresh Spec: '$SPEC_NAME'..."
+          
+          PAYLOAD=$(jq -n \
+            --rawfile spec_content "$FILE" \
+            --arg name "$SPEC_NAME" \
+            '{ name: $name, type: "OPENAPI:3.0", files: [{ path: "index.yaml", content: $spec_content }] }')
+          HTTP_CODE=$(curl -s -X POST \
+            "https://api.getpostman.com/specs?workspaceId=$POSTMAN_WORKSPACE_ID" \
+            -H "X-Api-Key: $POSTMAN_API_KEY" \
             -H "Content-Type: application/json" \
-            --data-binary @specs/payment-refund-api-openapi.yaml
-      # 4b. Update spec if exists
-      - name: Update Spec in Postman (if exists)
-        if: env.HTTP_STATUS == '200'
+            -d "$PAYLOAD" \
+            -o response.json \
+            -w "%{http_code}")
+            
+          if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
+            echo "::error::Failed to create spec. Status: $HTTP_CODE"
+            cat response.json
+            exit 1
+          fi
+          NEW_ID=$(cat response.json | jq -r '.spec.id')
+          echo "✅ Spec successfully created. ID: $NEW_ID"
+          echo "spec_id=$NEW_ID" >> $GITHUB_OUTPUT
+      #######################################################################
+      # 3. GENERATE COLLECTION LOCALLY
+      #######################################################################
+      - name: Generate Collection Locally
+        id: local_gen
         run: |
-          echo "Spec exists — updating…"
-          curl -X PUT \
-            "https://api.getpostman.com/specs/${{ secrets.POSTMAN_SPEC_ID }}" \
-            -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            --data-binary @specs/payment-refund-api-openapi.yaml
-      # 5. Regenerate collection with overwrite=true
-      - name: Regenerate Collection from Spec
+          echo "Generating collection from: ${{ steps.spec.outputs.specfile }}"
+          
+          # We removed the --test flag which was causing the crash
+          # We also use quotes around the filename to handle spaces safely
+          npx openapi-to-postmanv2 \
+            -s "${{ steps.spec.outputs.specfile }}" \
+            -o collection.json \
+            -p 
+            
+          # Verify the file was actually created and has content
+          if [[ ! -s collection.json ]]; then
+            echo "::error::collection.json was NOT generated. Check the openapi-to-postmanv2 logs above."
+            exit 1
+          fi
+          
+          echo "✅ Collection generated successfully."
+      #######################################################################
+      # 4. CLEAN SYNC COLLECTION
+      #######################################################################
+      - name: Clean Sync Collection
+        id: upload_collection
         run: |
-          curl -X POST \
-            "https://api.getpostman.com/specs/${{ secrets.POSTMAN_SPEC_ID }}/generations/collection" \
-            -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
+          SPEC_NAME="${{ steps.spec.outputs.specname }}"
+          
+          echo "🔎 Checking for existing collections named: '$SPEC_NAME'..."
+          
+          # 1. Fetch all collections
+          LIST_RESPONSE=$(curl -s -X GET "https://api.getpostman.com/collections?workspaceId=$POSTMAN_WORKSPACE_ID" \
+            -H "X-Api-Key: $POSTMAN_API_KEY")
+            
+          # 2. Find ALL IDs with this name
+          MATCHING_IDS=$(echo "$LIST_RESPONSE" | jq -r --arg name "$SPEC_NAME" '.collections[] | select(.name == $name) | .id')
+          
+          # 3. DELETE them (Clear the path)
+          if [ -n "$MATCHING_IDS" ]; then
+            for ID in $MATCHING_IDS; do
+              echo "🗑️ Deleting existing/stale Collection ID: $ID"
+              curl -s -X DELETE \
+                "https://api.getpostman.com/collections/$ID" \
+                -H "X-Api-Key: $POSTMAN_API_KEY" > /dev/null
+            done
+            echo "✅ Cleanup complete."
+          fi
+          
+          # 4. PREPARE PAYLOAD TO DISK
+          echo "📦 Wrapping collection for upload..."
+          # Use --slurpfile to handle large JSON safely, write to upload.json
+          jq -n --slurpfile content collection.json \
+            --arg name "$SPEC_NAME" \
+            '{collection: ($content[0] | .info.name = $name)}' > upload.json
+          # 5. UPLOAD FROM FILE
+          echo "🚀 Uploading new collection..."
+          
+          # Use --data-binary @upload.json to bypass bash argument limits
+          HTTP_CODE=$(curl -s -X POST \
+            "https://api.getpostman.com/collections?workspaceId=$POSTMAN_WORKSPACE_ID" \
+            -H "X-Api-Key: $POSTMAN_API_KEY" \
             -H "Content-Type: application/json" \
-            -d '{
-                  "options": {
-                    "overwrite": true,
-                    "requestParametersResolution": "example"
-                  }
-                }'
-      # 6. Inject JWT pre-request script dynamically
-      - name: Inject JWT Pre-request Script
+            --data-binary @upload.json \
+            -o response_body.json \
+            -w "%{http_code}")
+          
+          RESPONSE_BODY=$(cat response_body.json)
+          COLLECTION_ID=$(echo "$RESPONSE_BODY" | jq -r '.collection.id')
+          
+          if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]] || [[ -z "$COLLECTION_ID" || "$COLLECTION_ID" == "null" ]]; then
+            echo "::error::Failed to upload collection. Status: $HTTP_CODE"
+            echo "Response: $RESPONSE_BODY"
+            exit 1
+          fi
+          
+          echo "✅ Collection uploaded. ID: $COLLECTION_ID"
+          echo "collection_id=$COLLECTION_ID" >> $GITHUB_OUTPUT
+      #######################################################################
+      # 5. Inject JWT Pre-request Script
+      #######################################################################
+      - name: Inject Advanced JWT Script
         run: |
-          COLLECTION_ID="${{ secrets.POSTMAN_COLLECTION_ID }}"
-          curl -X PUT "https://api.getpostman.com/collections/$COLLECTION_ID" \
-            -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
+          COLLECTION_ID="${{ steps.upload_collection.outputs.collection_id }}"
+          API_KEY="$POSTMAN_API_KEY"
+          # 5a. Fetch Collection
+          FULL_COLLECTION_RESPONSE=$(curl -s -X GET "https://api.getpostman.com/collections/$COLLECTION_ID" -H "X-Api-Key: $API_KEY")
+          
+          if echo "$FULL_COLLECTION_RESPONSE" | jq -e '.collection' > /dev/null; then
+              FULL_COLLECTION=$(echo "$FULL_COLLECTION_RESPONSE" | jq '.collection')
+          else
+              echo "CRITICAL ERROR: Failed to fetch collection for modification (ID: $COLLECTION_ID). Check API Key permissions."
+              exit 1
+          fi
+          
+          # 5b. Define and Modify (Advanced JWT Script)
+          JWT_SCRIPT='[ { "listen": "prerequest", "script": { "type": "text/javascript", "exec": [ "// Advanced JWT Auth: Checks expiry and refreshes token", "const clientId = pm.environment.get(\"clientId\");", "const clientSecret = pm.environment.get(\"clientSecret\");", "const tokenUrl = pm.environment.get(\"tokenUrl\");", "const cachedToken = pm.environment.get(\"jwtToken\");", "const tokenExpiry = parseInt(pm.environment.get(\"tokenExpiry\"));", "", "// Check if token is valid (exists AND expiry time is > 30s in the future)", "if (cachedToken && tokenExpiry && Date.now() < (tokenExpiry - 30000)) {", "    pm.request.headers.upsert({key: \"Authorization\", value: \"Bearer \" + cachedToken});", "    return; // Skip token request", "}", "", "// Request new token", "pm.sendRequest({", "    url: tokenUrl,", "    method: \"POST\",", "    header: {\"Content-Type\": \"application/x-www-form-urlencoded\"},", "    body: {mode: \"urlencoded\", urlencoded: [{key: \"grant_type\", value: \"client_credentials\"}, {key: \"client_id\", value: clientId}, {key: \"client_secret\", value: clientSecret}]} ", "}, (err, response) => {", "    if (err || response.code !== 200) {", "        console.error(\"Token request failed:\", err || response.status);", "        return;", "    }", "    const jsonData = response.json();", "    const token = jsonData.access_token;", "    const expires_in_ms = jsonData.expires_in * 1000; ", "    pm.environment.set(\"jwtToken\", token);", "    pm.environment.set(\"tokenExpiry\", Date.now() + expires_in_ms);", "    pm.request.headers.upsert({key: \"Authorization\", value: \"Bearer \" + token});", "});" ] } } ]'
+                      
+          MODIFIED_PAYLOAD=$(echo "$FULL_COLLECTION" | jq --argjson script_event "$JWT_SCRIPT" '. + {event: $script_event}')
+                    
+          # 5c. Push Update (PUT)
+          # We also use a temp file here for safety
+          echo "$MODIFIED_PAYLOAD" > modified_collection.json
+          
+          curl -s -X PUT \
+            "https://api.getpostman.com/collections/$COLLECTION_ID" \
+            -H "X-Api-Key: $API_KEY" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"event\": [
-                {
-                  \"listen\": \"prerequest\",
-                  \"script\": {
-                    \"type\": \"text/javascript\",
-                    \"exec\": [
-                      \"const clientId = '$JWT_CLIENT_ID';\",
-                      \"const clientSecret = '$JWT_CLIENT_SECRET';\",
-                      \"const tokenUrl = '$JWT_TOKEN_URL';\",
-                      \"const audience = '$JWT_AUDIENCE';\",
-                      \"const options = { method: 'POST', url: tokenUrl, header: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'client_id=' + clientId + '&client_secret=' + clientSecret + '&audience=' + audience + '&grant_type=client_credentials' };\",
-                      \"pm.sendRequest(options, function (err, res) { pm.environment.set('jwtToken', res.json().access_token); });\"
-                    ]
-                  }
-                }
-              ]
-            }"
-      # 7. Run Postman collection tests
-      - name: Run Collection Tests
+            --data-binary @modified_collection.json > /dev/null
+          
+          echo "SUCCESS: Collection updated with advanced JWT script."
+      #######################################################################
+      # 6. CREATE DEV ENVIRONMENT
+      #######################################################################
+      - name: Create Base Dev Environment
+        id: create_env
         run: |
-          COLLECTION_ID="${{ secrets.POSTMAN_COLLECTION_ID }}"
-          curl -X POST \
-            "https://api.getpostman.com/collections/$COLLECTION_ID/run" \
-            -H "X-Api-Key: ${{ secrets.POSTMAN_API_KEY }}" \
+          ENV_PAYLOAD=$(jq -n \
+            --arg baseUrl "$MOCK_SERVER_URL" \
+            --arg tokenUrl "$AUTH_SERVER_URL" \
+            '{
+              "environment": {
+                "name": "Payment Processing - Dev",
+                "values": [
+                  { "key": "baseUrl", "value": $baseUrl, "enabled": true },
+                  { "key": "tokenUrl", "value": $tokenUrl, "enabled": true },
+                  { "key": "clientId", "value": "dev-client-id-internal", "enabled": true },
+                  { "key": "clientSecret", "value": "dev-secret-internal", "enabled": true },
+                  { "key": "jwtToken", "value": "", "enabled": true },
+                  { "key": "tokenExpiry", "value": "0", "enabled": true }
+                ]
+              }
+            }')
+          HTTP_CODE=$(curl -X POST \
+            "https://api.getpostman.com/environments?workspaceId=$POSTMAN_WORKSPACE_ID" \
+            -H "X-Api-Key: $POSTMAN_API_KEY" \
             -H "Content-Type: application/json" \
-            -d "{
-                  \"environment\": {
-                    \"values\": [
-                      {\"key\": \"baseUrl\", \"value\": \"$BASE_URL\", \"enabled\": true},
-                      {\"key\": \"jwtToken\", \"value\": \"{{jwtToken}}\", \"enabled\": true}
-                    ]
-                  }
-                }"
+            -d "$ENV_PAYLOAD" \
+            -o response_env_body.json \
+            -w "%{http_code}")
+          
+          RESPONSE_BODY=$(cat response_env_body.json)
+          ENV_ID=$(echo "$RESPONSE_BODY" | jq -r '.environment.id')
+          
+          if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]] || [[ -z "$ENV_ID" || "$ENV_ID" == "null" ]]; then
+            echo "WARNING: Environment creation failed (possibly exists or API Key issue). Status: $HTTP_CODE"
+            echo "RAW RESPONSE BODY: $RESPONSE_BODY"
+           else
+            echo "SUCCESS: Dev Environment created. ID: $ENV_ID"
+          fi
+      #######################################################################
+      # 7. Run tests using Newman (Final CI/CD Check)
+      #######################################################################
+      - name: Run Tests (Newman Validation)
+        run: |
+          COLLECTION_ID="${{ steps.upload_collection.outputs.collection_id }}"
+          echo "Running Newman tests against your Mock Server (CI/CD validation)..."
+          
+          # Using MOCK_SERVER_URL and AUTH_SERVER_URL environment variables directly
+          npx newman run "https://api.getpostman.com/collections/$COLLECTION_ID?apikey=$POSTMAN_API_KEY" \
+            --insecure \
+            --env-var "baseUrl=$MOCK_SERVER_URL" \
+            --env-var "tokenUrl=$AUTH_SERVER_URL" \
+            --env-var "clientId=mock_client" \
+            --env-var "clientSecret=mock_secret"
+            
+          echo "Newman run complete."
