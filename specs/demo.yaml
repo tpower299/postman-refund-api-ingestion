@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Payment Processing API - Refund Service
   description: |
-    Comprehensive API for managing payment refunds in a financial services platform.
+    DEMO DEMO DEMO DEMO Comprehensive API for managing payment refunds in a financial services platform.
     This API handles_refund creation, status tracking, cancellation, and reporting for
     payment transactions processed through the authorization and capture workflow.
     
